@@ -16,6 +16,7 @@ import logging
 from typing import List, Optional
 
 import numpy as np
+from scipy.linalg import cho_factor, cho_solve
 from scipy.optimize import minimize
 from scipy.special import gammaln
 
@@ -81,9 +82,9 @@ def log_marginal_likelihood(
     beta_0 : np.ndarray
         Prior mean vector with shape ``(nk,)``.
     V_A_inv : np.ndarray
-        Per-equation prior precision matrix with shape ``(k, k)``.
+        Diagonal per-equation prior precision matrix with shape ``(k, k)``.
     S_0 : np.ndarray
-        Inverse-Wishart scale matrix with shape ``(n, n)``.
+        Diagonal inverse-Wishart scale matrix with shape ``(n, n)``.
     nu_0 : float
     n : int
 
@@ -91,51 +92,58 @@ def log_marginal_likelihood(
     -------
     float
         Log marginal likelihood (returns -1e5 on failure).
+
+    Notes
+    -----
+    Reuses the posterior-precision Cholesky factor for the coefficient solve
+    and determinant. The residual-based posterior scale avoids subtracting
+    large data cross-products for trending level series. As in the Minnesota
+    formulation, both prior matrices are assumed diagonal and positive.
+
+    Failed factorisations and non-finite results return the failure value;
+    no jitter, eigenvalue clipping, or prior-mean solve fallback is applied.
     """
     k = len(beta_0) // n
     A_0 = beta_0.reshape(n, k).T
-    b = A_0
-    x = Z
-    y = Y
     T = Y.shape[0]
-    omega_inv = V_A_inv
-    d = nu_0
+    precision = np.diag(V_A_inv)
     psi = np.diag(S_0)
 
+    if np.any(precision <= 0) or np.any(psi <= 0):
+        return -1e5
+
     try:
-        B_hat = np.linalg.solve(x.T @ x + omega_inv, x.T @ y + omega_inv @ b)
-    except np.linalg.LinAlgError:
-        B_hat = b
+        posterior_factor = cho_factor(Z.T @ Z + V_A_inv, lower=True)
+        B_hat = cho_solve(posterior_factor, Z.T @ Y + V_A_inv @ A_0)
+        # |I + V_A Z'Z| = |V_A^-1 + Z'Z| / |V_A^-1|.
+        logdet_A = (
+            2 * np.log(np.diag(posterior_factor[0])).sum()
+            - np.log(precision).sum()
+        )
 
-    residuals = y - x @ B_hat
-
-    sqrt_omega = np.diag(1.0 / np.sqrt(np.diag(omega_inv)))
-    aaa = sqrt_omega @ (x.T @ x) @ sqrt_omega
-
-    inv_sqrt_psi = np.diag(1.0 / np.sqrt(psi))
-    middle_term = residuals.T @ residuals + (B_hat - b).T @ omega_inv @ (B_hat - b)
-    bbb = inv_sqrt_psi @ middle_term @ inv_sqrt_psi
-
-    eigen_A = np.real(np.linalg.eigvals(aaa))
-    eigen_A[eigen_A < 1e-12] = 0
-    eigen_A = eigen_A + 1
-
-    eigen_B = np.real(np.linalg.eigvals(bbb))
-    eigen_B[eigen_B < 1e-12] = 0
-    eigen_B = eigen_B + 1
+        residuals = Y - Z @ B_hat
+        deviation = B_hat - A_0
+        middle_term = residuals.T @ residuals + deviation.T @ V_A_inv @ deviation
+        inv_sqrt_psi = 1.0 / np.sqrt(psi)
+        scaled_scale = inv_sqrt_psi[:, None] * middle_term * inv_sqrt_psi[None, :]
+        scaled_scale.flat[:: n + 1] += 1
+        scale_factor = cho_factor(scaled_scale, lower=True)
+        logdet_B = 2 * np.log(np.diag(scale_factor[0])).sum()
+    except (np.linalg.LinAlgError, ValueError):
+        return -1e5
 
     logML = (
         -n * T * np.log(np.pi) / 2
-        + np.sum(gammaln((T + d - np.arange(n)) / 2) - gammaln((d - np.arange(n)) / 2))
+        + np.sum(
+            gammaln((T + nu_0 - np.arange(n)) / 2)
+            - gammaln((nu_0 - np.arange(n)) / 2)
+        )
         - T * np.sum(np.log(psi)) / 2
-        - n * np.sum(np.log(eigen_A)) / 2
-        - (T + d) * np.sum(np.log(eigen_B)) / 2
+        - n * logdet_A / 2
+        - (T + nu_0) * logdet_B / 2
     )
 
-    if not np.isfinite(logML) or np.isnan(logML):
-        logML = -1e5
-
-    return logML
+    return logML if np.isfinite(logML) else -1e5
 
 
 # ======================================================================
