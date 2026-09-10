@@ -117,8 +117,7 @@ def log_marginal_likelihood(
         B_hat = cho_solve(posterior_factor, Z.T @ Y + V_A_inv @ A_0)
         # |I + V_A Z'Z| = |V_A^-1 + Z'Z| / |V_A^-1|.
         logdet_A = (
-            2 * np.log(np.diag(posterior_factor[0])).sum()
-            - np.log(precision).sum()
+            2 * np.log(np.diag(posterior_factor[0])).sum() - np.log(precision).sum()
         )
 
         residuals = Y - Z @ B_hat
@@ -135,8 +134,7 @@ def log_marginal_likelihood(
     logML = (
         -n * T * np.log(np.pi) / 2
         + np.sum(
-            gammaln((T + nu_0 - np.arange(n)) / 2)
-            - gammaln((nu_0 - np.arange(n)) / 2)
+            gammaln((T + nu_0 - np.arange(n)) / 2) - gammaln((nu_0 - np.arange(n)) / 2)
         )
         - T * np.sum(np.log(psi)) / 2
         - n * logdet_A / 2
@@ -264,10 +262,12 @@ def tune_priors(
     soc: Optional[bool] = None,
     sur: Optional[bool] = None,
     rng: Optional[np.random.Generator] = None,
+    backend: str = "auto",
 ) -> None:
     """Optimise hyperparameters by maximising the marginal likelihood.
 
-    Uses BFGS with optional multi-start.  Modifies *model* in place.
+    Uses BFGS with a JAX-compiled, double-precision objective and automatic
+    gradients, with optional multi-start. Modifies *model* only after fitting.
 
     Parameters
     ----------
@@ -299,18 +299,26 @@ def tune_priors(
         ``np.random.default_rng(rng)``, so a plain seed, an existing
         ``Generator``, or ``None`` (nondeterministic) are all accepted. The
         global NumPy random state is never touched.
+    backend : str
+        ``"auto"`` uses JAX if it is installed and otherwise uses the legacy
+        NumPy/SciPy finite-difference path. ``"jax"`` requires JAX, while
+        ``"numpy"`` always selects the legacy path.
 
     Raises
     ------
     ValueError
-        If ``initial_values`` contains a non-positive value.
+        If ``initial_values`` contains a non-positive value or ``backend`` is
+        invalid.
+    ImportError
+        If ``backend="jax"`` is requested without the optional JAX dependency.
     """
     soc = model.soc if soc is None else soc
     sur = model.sur if sur is None else sur
+    if backend not in {"auto", "jax", "numpy"}:
+        raise ValueError("backend must be one of 'auto', 'jax', or 'numpy'")
     rng = np.random.default_rng(rng)
 
     Y, Z = construct_Y_Z(data, n_lags, covid_indices)
-    nb_dummy_obs = 0
 
     if initial_values is not None:
         if np.any(initial_values <= 0):
@@ -323,6 +331,48 @@ def tune_priors(
     logger.info("Optimising hyperparameters...")
     best_result = None
     best_fun = np.inf
+    use_jax = backend != "numpy"
+    if use_jax:
+        try:
+            from .jax_marginal_likelihood import build_objective
+        except ImportError:
+            if backend == "jax":
+                raise ImportError(
+                    "backend='jax' requires the optional dependency; install bvar[jax]"
+                ) from None
+            use_jax = False
+
+    if use_jax:
+        objective = build_objective(
+            data,
+            n_lags,
+            covid_indices,
+            levels,
+            model,
+            Y,
+            Z,
+            add_priors,
+            soc,
+            sur,
+        )
+        minimise_kwargs = {"jac": True}
+    else:
+        objective = objective_function
+        minimise_kwargs = {
+            "args": (
+                data,
+                n_lags,
+                covid_indices,
+                levels,
+                0,
+                model,
+                Y,
+                Z,
+                add_priors,
+                soc,
+                sur,
+            )
+        }
 
     for restart in range(nb_restart + 1):
         if restart == 0:
@@ -332,25 +382,15 @@ def tune_priors(
             x0 = best_result.x + noise
 
         result = minimize(
-            objective_function,
+            objective,
             x0=x0,
-            args=(
-                data,
-                n_lags,
-                covid_indices,
-                levels,
-                nb_dummy_obs,
-                model,
-                Y,
-                Z,
-                add_priors,
-                soc,
-                sur,
-            ),
             method="BFGS",
             options={"maxiter": 1000},
+            **minimise_kwargs,
         )
 
+        if not np.isfinite(result.fun):
+            raise ValueError("ML optimisation returned a non-finite objective")
         if result.fun < best_fun:
             best_result = result
             best_fun = result.fun

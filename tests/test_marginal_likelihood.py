@@ -1,4 +1,5 @@
 import copy
+import sys
 
 import numpy as np
 import pandas as pd
@@ -262,3 +263,40 @@ def test_optimise_does_not_touch_global_numpy_state():
     assert state_before[0] == state_after[0]
     assert np.array_equal(state_before[1], state_after[1])
     assert state_before[2:] == state_after[2:]
+
+
+@pytest.mark.parametrize("backend", ["numpy", "jax", "auto"])
+def test_optimise_hyperparameters_accepts_ml_backend(backend):
+    """The public ML API forwards each supported backend selection."""
+    bvar, data = _make_ml_bvar_and_data(T=40)
+    bvar.optimise_hyperparameters(
+        data,
+        random_state=42,
+        optimisation_backend=backend,
+    )
+    assert np.all(np.isfinite(bvar.model.to_vector()))
+
+
+def test_auto_backend_falls_back_when_jax_is_unavailable(monkeypatch):
+    """Auto mode preserves the legacy path when the optional extra is absent."""
+    bvar, data = _make_ml_bvar_and_data(T=40)
+    monkeypatch.setitem(
+        sys.modules,
+        "bvar.models.conjugate.jax_marginal_likelihood",
+        None,
+    )
+    bvar.optimise_hyperparameters(
+        data,
+        random_state=42,
+        optimisation_backend="auto",
+    )
+    assert np.all(np.isfinite(bvar.model.to_vector()))
+
+
+def test_unknown_ml_backend_is_rejected():
+    """Backend typos fail before changing the model state."""
+    bvar, data = _make_ml_bvar_and_data(T=40)
+    before = bvar.model.to_vector().copy()
+    with pytest.raises(ValueError, match="optimisation_backend"):
+        bvar.optimise_hyperparameters(data, optimisation_backend="bogus")
+    np.testing.assert_array_equal(bvar.model.to_vector(), before)

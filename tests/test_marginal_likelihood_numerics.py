@@ -34,8 +34,9 @@ def reference_logml(Y, Z, beta_0, V_A_inv, S_0, nu_0, n):
     eig_b[eig_b < 1e-12] = 0
     value = (
         -n * T * np.log(np.pi) / 2
-        + np.sum(gammaln((T + nu_0 - np.arange(n)) / 2)
-                 - gammaln((nu_0 - np.arange(n)) / 2))
+        + np.sum(
+            gammaln((T + nu_0 - np.arange(n)) / 2) - gammaln((nu_0 - np.arange(n)) / 2)
+        )
         - T * np.log(psi).sum() / 2
         - n * np.log1p(eig_a).sum() / 2
         - (T + nu_0) * np.log1p(eig_b).sum() / 2
@@ -47,11 +48,22 @@ def reference_logml(Y, Z, beta_0, V_A_inv, S_0, nu_0, n):
 @pytest.mark.parametrize("levels", [False, True])
 @pytest.mark.parametrize("covid", [False, True])
 @pytest.mark.parametrize("lags", [1, 5])
-@pytest.mark.parametrize("hyperparameters", [
-    [0.2, 2, 1, 1], [0.01, 4, 0.02, 0.02], [5, 0.1, 20, 20],
-])
+@pytest.mark.parametrize(
+    "hyperparameters",
+    [
+        [0.2, 2, 1, 1],
+        [0.01, 4, 0.02, 0.02],
+        [5, 0.1, 20, 20],
+    ],
+)
 def test_full_objective_matches_original(
-    monkeypatch, soc, sur, levels, covid, lags, hyperparameters,
+    monkeypatch,
+    soc,
+    sur,
+    levels,
+    covid,
+    lags,
+    hyperparameters,
 ):
     """Include dummy-only subtraction and Gamma/softplus terms at fixed vectors.
 
@@ -89,16 +101,21 @@ def test_rank_deficient_design_matches_original(rows, precision):
     Y = rng.normal(size=(rows, 3))
     args = (Y, Z, np.zeros(24), np.eye(8) * precision, np.eye(3), 7, 3)
     np.testing.assert_allclose(
-        ml.log_marginal_likelihood(*args), reference_logml(*args),
-        atol=1e-6, rtol=1e-8,
+        ml.log_marginal_likelihood(*args),
+        reference_logml(*args),
+        atol=1e-6,
+        rtol=1e-8,
     )
 
 
 def test_logml_does_not_mutate_inputs():
     rng = np.random.default_rng(42)
     arrays = [
-        rng.normal(size=(30, 3)), rng.normal(size=(30, 7)),
-        rng.normal(size=21), np.eye(7), np.eye(3),
+        rng.normal(size=(30, 3)),
+        rng.normal(size=(30, 7)),
+        rng.normal(size=21),
+        np.eye(7),
+        np.eye(3),
     ]
     copies = [a.copy() for a in arrays]
     ml.log_marginal_likelihood(*arrays, 7, 3)
@@ -106,10 +123,14 @@ def test_logml_does_not_mutate_inputs():
         np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize("target,bad_value", [
-    *product(["precision", "scale"], [0.0, -1.0, np.nan, np.inf]),
-    ("data", np.nan), ("data", np.inf),
-])
+@pytest.mark.parametrize(
+    "target,bad_value",
+    [
+        *product(["precision", "scale"], [0.0, -1.0, np.nan, np.inf]),
+        ("data", np.nan),
+        ("data", np.inf),
+    ],
+)
 def test_logml_rejects_invalid_inputs(target, bad_value):
     Y, Z = np.ones((12, 2)), np.ones((12, 3))
     precision, scale = np.eye(3), np.eye(2)
@@ -120,7 +141,10 @@ def test_logml_rejects_invalid_inputs(target, bad_value):
     else:
         scale[0, 0] = bad_value
     with np.errstate(invalid="ignore", divide="ignore"):
-        assert ml.log_marginal_likelihood(Y, Z, np.zeros(6), precision, scale, 6, 2) == -1e5
+        assert (
+            ml.log_marginal_likelihood(Y, Z, np.zeros(6), precision, scale, 6, 2)
+            == -1e5
+        )
 
 
 @pytest.mark.parametrize("failure_call", [1, 2])
@@ -137,7 +161,13 @@ def test_logml_rejects_failed_cholesky(monkeypatch, failure_call):
 
     monkeypatch.setattr(ml, "cho_factor", fail_factor)
     value = ml.log_marginal_likelihood(
-        np.ones((12, 2)), np.ones((12, 3)), np.zeros(6), np.eye(3), np.eye(2), 6, 2,
+        np.ones((12, 2)),
+        np.ones((12, 3)),
+        np.zeros(6),
+        np.eye(3),
+        np.eye(2),
+        6,
+        2,
     )
     assert value == -1e5
     assert calls == failure_call
@@ -160,15 +190,26 @@ def test_logml_reuses_precision_factor(monkeypatch):
     monkeypatch.setattr(ml, "cho_factor", record_factor)
     monkeypatch.setattr(ml, "cho_solve", check_solve)
     value = ml.log_marginal_likelihood(
-        np.ones((12, 2)), np.ones((12, 3)), np.zeros(6), np.eye(3), np.eye(2), 6, 2,
+        np.ones((12, 2)),
+        np.ones((12, 3)),
+        np.zeros(6),
+        np.eye(3),
+        np.eye(2),
+        6,
+        2,
     )
     assert np.isfinite(value) and value != -1e5
     assert len(factors) == 2
 
 
-@pytest.mark.parametrize("name,length,covid", [
-    ("pre_covid", 160, False), ("covid", 168, True), ("recent", 184, True),
-])
+@pytest.mark.parametrize(
+    "name,length,covid",
+    [
+        ("pre_covid", 160, False),
+        ("covid", 168, True),
+        ("recent", 184, True),
+    ],
+)
 def test_benchmark_fixed_and_fitted_objectives(name, length, covid):
     """Check captured original values, including its selected BFGS solution.
 
@@ -178,6 +219,8 @@ def test_benchmark_fixed_and_fitted_objectives(name, length, covid):
     there rather than treating the noisy original fitted value as exact.
     """
     path = Path(__file__).resolve().parents[1] / "benchmarks/ml-speed/baseline.json"
+    if not path.exists():
+        pytest.skip("benchmark baseline fixture is not present")
     baseline = json.loads(path.read_text())["cases"][name]
     rng = np.random.default_rng(1234)
     innovations = rng.normal(0, 0.02, (184, 19))
@@ -185,18 +228,34 @@ def test_benchmark_fixed_and_fitted_objectives(name, length, covid):
     innovations[160:168] *= 4
     values = 4 + np.cumsum(0.002 + innovations, axis=0)
     data = pd.DataFrame(
-        values[:length], index=pd.period_range("1980Q1", periods=length, freq="Q"),
+        values[:length],
+        index=pd.period_range("1980Q1", periods=length, freq="Q"),
     )
     fit = BVAR(5, NaturalConjugate(soc=True, sur=True, covid=covid), stationary=False)
     array = fit._validate_and_prepare_data(data)
     model = fit.model
-    model.pars.S_0, model.pars.nu_0 = model._compute_S0_nu0(array, 19, fit.covid_indices)
+    model.pars.S_0, model.pars.nu_0 = model._compute_S0_nu0(
+        array, 19, fit.covid_indices
+    )
     Y, Z = construct_Y_Z(array, 5, fit.covid_indices)
     vectors = baseline["fixed_vectors"] + [baseline["optimum"]["x"]]
     expected = baseline["fixed_objectives"] + [baseline["optimum"]["fun"]]
-    actual = [ml.objective_function(
-        np.array(x), array, 5, fit.covid_indices, fit.vars_in_levels, 0,
-        model, Y, Z, True, True, True,
-    ) for x in vectors]
+    actual = [
+        ml.objective_function(
+            np.array(x),
+            array,
+            5,
+            fit.covid_indices,
+            fit.vars_in_levels,
+            0,
+            model,
+            Y,
+            Z,
+            True,
+            True,
+            True,
+        )
+        for x in vectors
+    ]
     np.testing.assert_allclose(actual[:-1], expected[:-1], atol=1e-6, rtol=0)
     np.testing.assert_allclose(actual[-1], expected[-1], atol=2e-6, rtol=0)
