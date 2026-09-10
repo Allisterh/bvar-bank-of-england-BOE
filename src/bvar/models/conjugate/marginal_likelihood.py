@@ -16,6 +16,7 @@ import logging
 from typing import List, Optional
 
 import numpy as np
+from scipy.linalg import cho_factor, cho_solve
 from scipy.optimize import minimize
 from scipy.special import gammaln
 
@@ -81,9 +82,9 @@ def log_marginal_likelihood(
     beta_0 : np.ndarray
         Prior mean vector with shape ``(nk,)``.
     V_A_inv : np.ndarray
-        Per-equation prior precision matrix with shape ``(k, k)``.
+        Diagonal per-equation prior precision matrix with shape ``(k, k)``.
     S_0 : np.ndarray
-        Inverse-Wishart scale matrix with shape ``(n, n)``.
+        Diagonal inverse-Wishart scale matrix with shape ``(n, n)``.
     nu_0 : float
     n : int
 
@@ -91,51 +92,56 @@ def log_marginal_likelihood(
     -------
     float
         Log marginal likelihood (returns -1e5 on failure).
+
+    Notes
+    -----
+    Reuses the posterior-precision Cholesky factor for the coefficient solve
+    and determinant. The residual-based posterior scale avoids subtracting
+    large data cross-products for trending level series. As in the Minnesota
+    formulation, both prior matrices are assumed diagonal and positive.
+
+    Failed factorisations and non-finite results return the failure value;
+    no jitter, eigenvalue clipping, or prior-mean solve fallback is applied.
     """
     k = len(beta_0) // n
     A_0 = beta_0.reshape(n, k).T
-    b = A_0
-    x = Z
-    y = Y
     T = Y.shape[0]
-    omega_inv = V_A_inv
-    d = nu_0
+    precision = np.diag(V_A_inv)
     psi = np.diag(S_0)
 
+    if np.any(precision <= 0) or np.any(psi <= 0):
+        return -1e5
+
     try:
-        B_hat = np.linalg.solve(x.T @ x + omega_inv, x.T @ y + omega_inv @ b)
-    except np.linalg.LinAlgError:
-        B_hat = b
+        posterior_factor = cho_factor(Z.T @ Z + V_A_inv, lower=True)
+        B_hat = cho_solve(posterior_factor, Z.T @ Y + V_A_inv @ A_0)
+        # |I + V_A Z'Z| = |V_A^-1 + Z'Z| / |V_A^-1|.
+        logdet_A = (
+            2 * np.log(np.diag(posterior_factor[0])).sum() - np.log(precision).sum()
+        )
 
-    residuals = y - x @ B_hat
-
-    sqrt_omega = np.diag(1.0 / np.sqrt(np.diag(omega_inv)))
-    aaa = sqrt_omega @ (x.T @ x) @ sqrt_omega
-
-    inv_sqrt_psi = np.diag(1.0 / np.sqrt(psi))
-    middle_term = residuals.T @ residuals + (B_hat - b).T @ omega_inv @ (B_hat - b)
-    bbb = inv_sqrt_psi @ middle_term @ inv_sqrt_psi
-
-    eigen_A = np.real(np.linalg.eigvals(aaa))
-    eigen_A[eigen_A < 1e-12] = 0
-    eigen_A = eigen_A + 1
-
-    eigen_B = np.real(np.linalg.eigvals(bbb))
-    eigen_B[eigen_B < 1e-12] = 0
-    eigen_B = eigen_B + 1
+        residuals = Y - Z @ B_hat
+        deviation = B_hat - A_0
+        middle_term = residuals.T @ residuals + deviation.T @ V_A_inv @ deviation
+        inv_sqrt_psi = 1.0 / np.sqrt(psi)
+        scaled_scale = inv_sqrt_psi[:, None] * middle_term * inv_sqrt_psi[None, :]
+        scaled_scale.flat[:: n + 1] += 1
+        scale_factor = cho_factor(scaled_scale, lower=True)
+        logdet_B = 2 * np.log(np.diag(scale_factor[0])).sum()
+    except (np.linalg.LinAlgError, ValueError):
+        return -1e5
 
     logML = (
         -n * T * np.log(np.pi) / 2
-        + np.sum(gammaln((T + d - np.arange(n)) / 2) - gammaln((d - np.arange(n)) / 2))
+        + np.sum(
+            gammaln((T + nu_0 - np.arange(n)) / 2) - gammaln((nu_0 - np.arange(n)) / 2)
+        )
         - T * np.sum(np.log(psi)) / 2
-        - n * np.sum(np.log(eigen_A)) / 2
-        - (T + d) * np.sum(np.log(eigen_B)) / 2
+        - n * logdet_A / 2
+        - (T + nu_0) * logdet_B / 2
     )
 
-    if not np.isfinite(logML) or np.isnan(logML):
-        logML = -1e5
-
-    return logML
+    return logML if np.isfinite(logML) else -1e5
 
 
 # ======================================================================
@@ -256,10 +262,12 @@ def tune_priors(
     soc: Optional[bool] = None,
     sur: Optional[bool] = None,
     rng: Optional[np.random.Generator] = None,
+    backend: str = "auto",
 ) -> None:
     """Optimise hyperparameters by maximising the marginal likelihood.
 
-    Uses BFGS with optional multi-start.  Modifies *model* in place.
+    Uses BFGS with a JAX-compiled, double-precision objective and automatic
+    gradients, with optional multi-start. Modifies *model* only after fitting.
 
     Parameters
     ----------
@@ -291,18 +299,26 @@ def tune_priors(
         ``np.random.default_rng(rng)``, so a plain seed, an existing
         ``Generator``, or ``None`` (nondeterministic) are all accepted. The
         global NumPy random state is never touched.
+    backend : str
+        ``"auto"`` uses JAX if it is installed and otherwise uses the legacy
+        NumPy/SciPy finite-difference path. ``"jax"`` requires JAX, while
+        ``"numpy"`` always selects the legacy path.
 
     Raises
     ------
     ValueError
-        If ``initial_values`` contains a non-positive value.
+        If ``initial_values`` contains a non-positive value or ``backend`` is
+        invalid.
+    ImportError
+        If ``backend="jax"`` is requested without the optional JAX dependency.
     """
     soc = model.soc if soc is None else soc
     sur = model.sur if sur is None else sur
+    if backend not in {"auto", "jax", "numpy"}:
+        raise ValueError("backend must be one of 'auto', 'jax', or 'numpy'")
     rng = np.random.default_rng(rng)
 
     Y, Z = construct_Y_Z(data, n_lags, covid_indices)
-    nb_dummy_obs = 0
 
     if initial_values is not None:
         if np.any(initial_values <= 0):
@@ -315,6 +331,48 @@ def tune_priors(
     logger.info("Optimising hyperparameters...")
     best_result = None
     best_fun = np.inf
+    use_jax = backend != "numpy"
+    if use_jax:
+        try:
+            from .jax_marginal_likelihood import build_objective
+        except ImportError:
+            if backend == "jax":
+                raise ImportError(
+                    "backend='jax' requires the optional dependency; install bvar[jax]"
+                ) from None
+            use_jax = False
+
+    if use_jax:
+        objective = build_objective(
+            data,
+            n_lags,
+            covid_indices,
+            levels,
+            model,
+            Y,
+            Z,
+            add_priors,
+            soc,
+            sur,
+        )
+        minimise_kwargs = {"jac": True}
+    else:
+        objective = objective_function
+        minimise_kwargs = {
+            "args": (
+                data,
+                n_lags,
+                covid_indices,
+                levels,
+                0,
+                model,
+                Y,
+                Z,
+                add_priors,
+                soc,
+                sur,
+            )
+        }
 
     for restart in range(nb_restart + 1):
         if restart == 0:
@@ -324,25 +382,15 @@ def tune_priors(
             x0 = best_result.x + noise
 
         result = minimize(
-            objective_function,
+            objective,
             x0=x0,
-            args=(
-                data,
-                n_lags,
-                covid_indices,
-                levels,
-                nb_dummy_obs,
-                model,
-                Y,
-                Z,
-                add_priors,
-                soc,
-                sur,
-            ),
             method="BFGS",
             options={"maxiter": 1000},
+            **minimise_kwargs,
         )
 
+        if not np.isfinite(result.fun):
+            raise ValueError("ML optimisation returned a non-finite objective")
         if result.fun < best_fun:
             best_result = result
             best_fun = result.fun

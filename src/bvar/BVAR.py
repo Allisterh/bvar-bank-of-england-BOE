@@ -400,6 +400,7 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
         cv_options: Optional[dict] = None,
         add_priors: bool = True,
         random_state: Optional[int] = None,
+        optimisation_backend: str = "auto",
     ) -> None:
         """
         Optimise prior hyperparameters using the specified method.
@@ -414,7 +415,7 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
             the index should be a regularly-spaced pd.PeriodIndex or
             pd.DatetimeIndex (any frequency, not only quarterly).
         nb_restart : int
-            Number of random restarts for the L-BFGS-B optimiser to avoid local minima.
+            Number of random restarts for the BFGS optimiser to avoid local minima.
             Default is 0 (single optimisation run).
         initial_values : Optional[np.ndarray]
             Initial hyperparameter values. If ``None``, the method starts from
@@ -438,6 +439,11 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
             generator set at construction for this call; otherwise the
             the method uses the instance generator. The global NumPy random
             state remains unchanged. Default is None.
+        optimisation_backend : str
+            Backend for marginal-likelihood optimisation. ``"auto"`` uses
+            JAX when installed and otherwise falls back to the NumPy/SciPy
+            finite-difference implementation. ``"jax"`` requires the
+            optional JAX dependency; ``"numpy"`` forces the legacy path.
 
         Returns
         -------
@@ -454,6 +460,9 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
         -----
         For "ml" method, optimises c1, c3, and optionally mu (if SOC prior)
         and theta (if SUR prior) by maximising the marginal likelihood.
+        BFGS uses JAX-compiled, double-precision values and automatic gradients.
+        The first fit for each matrix shape includes compilation overhead;
+        subsequent fits of the same shape reuse the compiled code.
         """
         staged = deepcopy(self)
         staged.rng = self.rng
@@ -470,6 +479,7 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
                 cv_options=cv_options,
                 add_priors=add_priors,
                 random_state=random_state,
+                optimisation_backend=optimisation_backend,
             )
         except Exception:
             operation_rng.bit_generator.state = rng_state
@@ -485,6 +495,7 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
         cv_options: Optional[dict] = None,
         add_priors: bool = True,
         random_state: Optional[int] = None,
+        optimisation_backend: str = "auto",
     ) -> None:
         """Run hyperparameter optimisation on this staging instance."""
         # Prepare data
@@ -505,6 +516,10 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
         # ================================================================================
 
         if self.optimisation_method == "ml":
+            if optimisation_backend not in {"auto", "jax", "numpy"}:
+                raise ValueError(
+                    "optimisation_backend must be one of 'auto', 'jax', or 'numpy'"
+                )
             if not self.model.supports_ml:
                 raise ValueError(
                     f"Marginal-likelihood optimisation is not available for "
@@ -530,6 +545,7 @@ class BVAR(Forecasting, GIRF, PlotBVAR, PlotGIRF, GridSearch):
                 soc=self.soc_,
                 sur=self.sur_,
                 rng=rng,
+                backend=optimisation_backend,
             )
 
         elif self.optimisation_method in ["cross_validation"]:
