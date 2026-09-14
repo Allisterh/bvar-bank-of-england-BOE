@@ -59,6 +59,7 @@ jax = [
 # checks need, so ``pip install -e ".[dev]"`` is all that is required.
 dev = [
     "bvar[jax,docs,notebooks]",
+    "conventional-pre-commit>=4.4.0",
     "pre-commit",
     "pydoclint",
     "pyarrow",
